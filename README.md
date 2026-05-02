@@ -1,4 +1,4 @@
-# HT32F50030 Makefile Firmware Skeleton
+# HT32F50030 Firmware Skeleton
 
 Minimal standalone GNU Make firmware skeleton for the Holtek HT32F50030 Cortex-M0+ MCU.
 
