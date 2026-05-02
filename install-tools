@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+TOOLS_DIR="$PROJECT_DIR/tools"
+TOOLCHAIN_DIR="$TOOLS_DIR/arm-gnu-toolchain"
+DOWNLOAD_DIR="$TOOLS_DIR/downloads"
+DEFAULT_VERSION="14.2.rel1"
+TARGET_TRIPLE="arm-none-eabi"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./install-tools [install] [--version VERSION] [--host HOST] [--force]
+  ./install-tools remove
+  ./install-tools status
+  ./install-tools --help
+
+Commands:
+  install   Download and unpack Arm GNU Toolchain into ./tools (default)
+  remove    Delete the project-local toolchain and cached downloads
+  status    Show whether ./tools contains a usable arm-none-eabi-gcc
+
+Options:
+  --version VERSION  Arm GNU Toolchain version, default: 14.2.rel1
+  --host HOST        Override host package name: x86_64, aarch64, darwin-x86_64, darwin-arm64, mingw-w64-i686
+  --force            Re-download/reinstall even if a local toolchain already exists
+
+Environment overrides:
+  TOOLCHAIN_URL      Full archive URL to download instead of the default Arm URL
+  TOOLCHAIN_ARCHIVE  Archive filename to use with TOOLCHAIN_URL if basename is not enough
+  TOOLCHAIN_SHA256   Expected archive SHA-256 checksum
+USAGE
+}
+
+die() {
+  printf 'install-tools: %s\n' "$*" >&2
+  exit 1
+}
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+detect_host() {
+  local os arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+
+  case "$os" in
+    Linux*)
+      case "$arch" in
+        x86_64|amd64) printf 'x86_64' ;;
+        aarch64|arm64) printf 'aarch64' ;;
+        *) die "unsupported Linux architecture: $arch" ;;
+      esac
+      ;;
+    Darwin*)
+      case "$arch" in
+        x86_64|amd64) printf 'darwin-x86_64' ;;
+        arm64|aarch64) printf 'darwin-arm64' ;;
+        *) die "unsupported macOS architecture: $arch" ;;
+      esac
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      printf 'mingw-w64-i686'
+      ;;
+    *)
+      die "unsupported host OS: $os"
+      ;;
+  esac
+}
+
+download_file() {
+  local url dest
+  url="$1"
+  dest="$2"
+
+  if have curl; then
+    curl --fail --location --output "$dest" "$url"
+  elif have wget; then
+    wget --output-document="$dest" "$url"
+  else
+    die "curl or wget is required to download the toolchain"
+  fi
+}
+
+verify_sha256() {
+  local checksum file
+  checksum="$1"
+  file="$2"
+
+  if have sha256sum; then
+    printf '%s  %s\n' "$checksum" "$file" | sha256sum --check --status
+  elif have shasum; then
+    printf '%s  %s\n' "$checksum" "$file" | shasum -a 256 --check --status
+  else
+    die "sha256sum or shasum is required when TOOLCHAIN_SHA256 is set"
+  fi
+}
+
+toolchain_gcc() {
+  if [ -x "$TOOLCHAIN_DIR/bin/$TARGET_TRIPLE-gcc" ]; then
+    printf '%s\n' "$TOOLCHAIN_DIR/bin/$TARGET_TRIPLE-gcc"
+  elif [ -x "$TOOLCHAIN_DIR/bin/$TARGET_TRIPLE-gcc.exe" ]; then
+    printf '%s\n' "$TOOLCHAIN_DIR/bin/$TARGET_TRIPLE-gcc.exe"
+  fi
+}
+
+extract_archive() {
+  local archive_path extract_dir
+  archive_path="$1"
+  extract_dir="$2"
+
+  case "$archive_path" in
+    *.tar.xz)
+      tar -xJf "$archive_path" -C "$extract_dir"
+      ;;
+    *.zip)
+      have unzip || die "unzip is required to extract Windows toolchain archives"
+      unzip -q "$archive_path" -d "$extract_dir"
+      ;;
+    *)
+      die "unsupported archive format: $archive_path"
+      ;;
+  esac
+}
+
+show_status() {
+  local gcc
+  gcc="$(toolchain_gcc)"
+
+  if [ -n "$gcc" ]; then
+    printf 'Project-local toolchain installed:\n  %s\n' "$gcc"
+    "$gcc" --version | sed -n '1p'
+  else
+    printf 'Project-local toolchain is not installed. Run ./install-tools install.\n'
+  fi
+}
+
+remove_tools() {
+  rm -rf "$TOOLCHAIN_DIR" "$DOWNLOAD_DIR"
+  find "$TOOLS_DIR" -maxdepth 1 -type d -name 'arm-gnu-toolchain-*' -exec rm -rf {} + 2>/dev/null || true
+  rmdir "$TOOLS_DIR" 2>/dev/null || true
+  printf 'Removed project-local toolchain files.\n'
+}
+
+install_tools() {
+  local version host force archive url archive_path install_dir tmpdir extract_dir top_dir top_count payload_dir gcc extension
+  version="$1"
+  host="$2"
+  force="$3"
+
+  gcc="$(toolchain_gcc)"
+  if [ -n "$gcc" ] && [ "$force" != "1" ]; then
+    show_status
+    printf 'Use --force to reinstall.\n'
+    return 0
+  fi
+
+  if [ -n "${TOOLCHAIN_URL:-}" ]; then
+    url="$TOOLCHAIN_URL"
+    archive="${TOOLCHAIN_ARCHIVE:-$(basename "${url%%\?*}")}"
+  else
+    case "$host" in
+      mingw*) extension="zip" ;;
+      *) extension="tar.xz" ;;
+    esac
+    archive="${TOOLCHAIN_ARCHIVE:-arm-gnu-toolchain-$version-$host-$TARGET_TRIPLE.$extension}"
+    url="https://developer.arm.com/-/media/Files/downloads/gnu/$version/binrel/$archive"
+  fi
+  archive_path="$DOWNLOAD_DIR/$archive"
+  install_dir="$TOOLCHAIN_DIR"
+
+  mkdir -p "$DOWNLOAD_DIR"
+
+  if [ "$force" = "1" ]; then
+    rm -f "$archive_path"
+    rm -rf "$install_dir"
+  fi
+
+  if [ ! -s "$archive_path" ]; then
+    printf 'Downloading %s\n' "$url"
+    download_file "$url" "$archive_path"
+  else
+    printf 'Using cached archive %s\n' "$archive_path"
+  fi
+
+  if [ -n "${TOOLCHAIN_SHA256:-}" ]; then
+    printf 'Verifying SHA-256...\n'
+    verify_sha256 "$TOOLCHAIN_SHA256" "$archive_path" || die "SHA-256 check failed"
+  fi
+
+  tmpdir="$(mktemp -d "$TOOLS_DIR/.extract.XXXXXX")"
+  extract_dir="$tmpdir/extract"
+  mkdir -p "$extract_dir"
+  trap 'if [ -n "${tmpdir:-}" ]; then rm -rf "$tmpdir"; fi' EXIT
+
+  printf 'Extracting into %s\n' "$TOOLS_DIR"
+  extract_archive "$archive_path" "$extract_dir"
+  top_dir="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d | sed -n '1p')"
+  top_count="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+  if [ "$top_count" = "1" ] && [ -d "$top_dir/bin" ]; then
+    payload_dir="$top_dir"
+  else
+    payload_dir="$extract_dir"
+  fi
+
+  rm -rf "$install_dir"
+  mv "$payload_dir" "$install_dir"
+  rm -rf "$tmpdir"
+  trap - EXIT
+
+  gcc="$(toolchain_gcc)"
+  [ -n "$gcc" ] || die "installed archive does not contain $TARGET_TRIPLE-gcc"
+
+  printf 'Installed project-local toolchain:\n  %s\n' "$gcc"
+  "$gcc" --version | sed -n '1p'
+}
+
+command_name="install"
+version="${TOOLCHAIN_VERSION:-$DEFAULT_VERSION}"
+host="${TOOLCHAIN_HOST:-}"
+force="0"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    install|remove|status)
+      command_name="$1"
+      ;;
+    --version)
+      shift
+      [ "$#" -gt 0 ] || die "--version requires a value"
+      version="$1"
+      ;;
+    --host)
+      shift
+      [ "$#" -gt 0 ] || die "--host requires a value"
+      host="$1"
+      ;;
+    --force)
+      force="1"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+  shift
+done
+
+case "$command_name" in
+  install)
+    if [ -z "$host" ]; then
+      if [ -n "${TOOLCHAIN_URL:-}" ]; then
+        host="custom"
+      else
+        host="$(detect_host)"
+      fi
+    fi
+    install_tools "$version" "$host" "$force"
+    ;;
+  remove)
+    remove_tools
+    ;;
+  status)
+    show_status
+    ;;
+esac

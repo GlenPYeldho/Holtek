@@ -1,0 +1,15 @@
+# Build outputs
+build/
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+
+# Project-local downloaded toolchains
+tools/
+
+# Local reference package; not required by the standalone build
+democode/
